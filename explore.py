@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[10]:
 
 
 import torch
@@ -10,16 +10,17 @@ import numpy as np
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import time
+from torch.utils.data import DataLoader, TensorDataset
 
 
-# In[2]:
+# In[4]:
 
 
 print("Versión de PyTorch:", torch.__version__)
 print("Versión de CUDA usada por PyTorch:", torch.version.cuda)
 
 
-# In[3]:
+# In[11]:
 
 
 dataset_path = 'gs://weatherbench2/datasets/era5/1959-2023_01_10-6h-240x121_equiangular_with_poles_conservative.zarr'
@@ -130,7 +131,7 @@ q_test = (test_data['specific_humidity'] - q_mean) / q_std
 p_test = (test_data['mean_sea_level_pressure'] - p_mean) / p_std
 
 
-# In[80]:
+# In[177]:
 
 
 u_train_tensor = torch.tensor(u_train.values, dtype=torch.float32, requires_grad=True)
@@ -200,7 +201,7 @@ print(f"Forma de q_train_tensor: {q_train_tensor.shape}")
 print(f"Forma de pe_train_tensor: {pe_train_tensor.shape}")
 
 
-# In[156]:
+# In[194]:
 
 
 longitudes = subset_selected['longitude'].values
@@ -209,59 +210,105 @@ levels = subset_selected['level'].values
 times = subset_selected['time'].values
 
 
+# In[195]:
+
+
+# Normalizar longitudes y latitudes
+longitudes_min, longitudes_max = longitudes.min(), longitudes.max()
+latitudes_min, latitudes_max = latitudes.min(), latitudes.max()
+levels_min, levels_max = levels.min(), levels.max()
+
+# Normalizar tiempo (asumiendo que ya has convertido a numérico)
+times_numeric = (times - np.datetime64('1970-01-01T00:00:00')) / np.timedelta64(1, 's')
+times_min, times_max = times_numeric.min(), times_numeric.max()
+
+longitudes_normalized = (longitudes - longitudes_min) / (longitudes_max - longitudes_min + 1e-8)
+latitudes_normalized = (latitudes - latitudes_min) / (latitudes_max - latitudes_min + 1e-8)
+levels_normalized = (levels - levels_min) / (levels_max - levels_min + 1e-8)
+times_normalized = (times_numeric - times_min) / (times_max - times_min + 1e-8)
+
+
+# In[198]:
+
+
+print(f"Longitudes normalizadas: {longitudes_normalized.min()} - {longitudes_normalized.max()}")
+print(f"Latitudes normalizadas: {latitudes_normalized.min()} - {latitudes_normalized.max()}")
+print(f"Tiempos normalizados: {times_normalized.min()} - {times_normalized.max()}")
+print(f"Niveles normalizados: {levels_normalized.min()} - {levels_normalized.max()}")
+
+
 # In[157]:
 
 
 print(f"Longitudes: {longitudes.shape}, Latitudes: {latitudes.shape}, Times: {times.shape}, Levels: {levels.shape}")
 
 
-# In[158]:
+# In[196]:
 
 
 x_coords, y_coords, t_coords, level_coords = np.meshgrid(
-    longitudes, latitudes, times[:u_train_tensor.shape[0]], levels, indexing="ij"
+    longitudes_normalized, latitudes_normalized, times_normalized[:u_train_tensor.shape[0]], levels_normalized, indexing="ij"
 )
 
 
-# In[159]:
-
-
-t_coords_numeric = (t_coords - np.datetime64('1970-01-01T00:00:00')) / np.timedelta64(1, 's')
-
-
-# In[160]:
+# In[197]:
 
 
 inputs = np.stack([
     x_coords.flatten(),
     y_coords.flatten(),
-    t_coords_numeric.flatten(),
+    t_coords.flatten(),
     level_coords.flatten()
 ], axis=1)
 
 
-# In[161]:
+# In[199]:
 
 
 inputs_tensor = torch.tensor(inputs, dtype=torch.float32, requires_grad=True)
 
 
-# In[27]:
+# In[245]:
+
+
+class PINNWithCNN(nn.Module):
+    def __init__(self):
+        super(PINNWithCNN, self).__init__()
+        self.conv1 = nn.Conv2d(4, 32, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(64, 5, kernel_size=3, stride=1, padding=1)  # Cambiar a 5 canales de salida
+
+    def forward(self, x):
+        x = nn.ReLU()(self.conv1(x))
+        x = nn.ReLU()(self.conv2(x))
+        x = self.conv3(x)  # Última capa genera 5 canales
+        return x
+
+
+# In[207]:
 
 
 class PINN(nn.Module):
     def __init__(self):
         super(PINN, self).__init__()
         self.layers = nn.Sequential(
-            nn.Linear(4, 64),
+            nn.Linear(4, 128),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.BatchNorm1d(128), 
+            nn.Dropout(0.2),   
+            nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(64, 5)
+            nn.Linear(128, 5)
         )
 
     def forward(self, x):
         return self.layers(x)
+
+
+# In[ ]:
+
+
+
 
 
 # In[28]:
@@ -286,39 +333,25 @@ def compute_gradients(pred, x):
     return grad[:, 0], grad[:, 1], grad[:, 2]  # Devuelve las derivadas parciales
 
 
-# In[144]:
+# In[204]:
 
 
-def loss_pde(model, x, u_true, v_true, p_true, T_true, q_true):
+def loss_pde(model, x):
     pred = model(x)
     u_pred, v_pred, p_pred, T_pred, q_pred = pred[:, 0], pred[:, 1], pred[:, 2], pred[:, 3], pred[:, 4]
 
     # Calcula gradientes para cada término
-    try:
-        u_x, u_y, u_t = compute_gradients(u_pred, x)
-        v_x, v_y, v_t = compute_gradients(v_pred, x)
-        T_x, T_y, T_t = compute_gradients(T_pred, x)
-        q_x, q_y, q_t = compute_gradients(q_pred, x)
-        p_x, p_y, _ = compute_gradients(p_pred, x)
-    except RuntimeError as e:
-        print(f"Error calculando gradientes: {e}")
-        print(f"x.requires_grad: {x.requires_grad}, pred.requires_grad: {pred.requires_grad}")
-        raise
+    u_x, u_y, u_t = compute_gradients(u_pred, x)
+    v_x, v_y, v_t = compute_gradients(v_pred, x)
+    T_x, T_y, T_t = compute_gradients(T_pred, x)
+    q_x, q_y, q_t = compute_gradients(q_pred, x)
+    p_x, p_y, _ = compute_gradients(p_pred, x)
 
-    # Define los términos de la pérdida
     momentum_u = u_t + u_pred * u_x + v_pred * u_y + p_x
     momentum_v = v_t + u_pred * v_x + v_pred * v_y + p_y
     continuity = u_x + v_y
     energy = T_t + u_pred * T_x + v_pred * T_y
     moisture = q_t + u_pred * q_x + v_pred * q_y
-
-    loss_data = (
-        torch.mean((u_pred - u_true) ** 2) +
-        torch.mean((v_pred - v_true) ** 2) +
-        torch.mean((p_pred - p_true) ** 2) +
-        torch.mean((T_pred - T_true) ** 2) +
-        torch.mean((q_pred - q_true) ** 2)
-    )
 
     loss_physics = (
         torch.mean(momentum_u ** 2) +
@@ -328,10 +361,11 @@ def loss_pde(model, x, u_true, v_true, p_true, T_true, q_true):
         torch.mean(moisture ** 2)
     )
 
-    return loss_data, loss_physics
+    loss_physics
+    return loss_physics
 
 
-# In[148]:
+# In[200]:
 
 
 # Ajustar las dimensiones para que coincidan
@@ -340,19 +374,6 @@ v_train_flat = v_train_tensor.flatten()
 T_train_flat = T_train_tensor.flatten()
 q_train_flat = q_train_tensor.flatten()
 p_train_flat = pe_train_tensor.flatten()
-
-# # Normalización de las salidas
-# u_min, u_max = torch.min(u_train_flat), torch.max(u_train_flat)
-# v_min, v_max = torch.min(v_train_flat), torch.max(v_train_flat)
-# T_min, T_max = torch.min(T_train_flat), torch.max(T_train_flat)
-# q_min, q_max = torch.min(q_train_flat), torch.max(q_train_flat)
-# p_min, p_max = torch.min(p_train_flat), torch.max(p_train_flat)
-
-# u_train_flat = (u_train_flat - u_min) / (u_max - u_min + 1e-8)
-# v_train_flat = (v_train_flat - v_min) / (v_max - v_min + 1e-8)
-# T_train_flat = (T_train_flat - T_min) / (T_max - T_min + 1e-8)
-# q_train_flat = (q_train_flat - q_min) / (q_max - q_min + 1e-8)
-# p_train_flat = (p_train_flat - p_min) / (p_max - p_min + 1e-8)
 
 print(f"u_train_flat.requires_grad: {u_train_flat.requires_grad}")
 print(f"v_train_flat.requires_grad: {v_train_flat.requires_grad}")
@@ -421,75 +442,283 @@ for batch_size, results in batch_results.items():
     )
 
 
-# In[162]:
+# In[214]:
 
-
-from torch.utils.data import DataLoader, TensorDataset
 
 dataset = TensorDataset(inputs_tensor, u_train_flat, v_train_flat, p_train_flat, T_train_flat, q_train_flat)
 loader = DataLoader(dataset, batch_size=256, shuffle=True)
 
 
-# In[164]:
+# In[219]:
+
+
+def train_model(model, loader, inputs_tensor, u_train_flat, v_train_flat, p_train_flat, 
+                T_train_flat, q_train_flat, optimizer, loss_pde, compute_accuracy, 
+                device, alpha=1.0, beta=10.0, epochs=1000):
+    model.to(device)
+    inputs_tensor = inputs_tensor.to(device)
+    u_train_flat = u_train_flat.to(device)
+    v_train_flat = v_train_flat.to(device)
+    p_train_flat = p_train_flat.to(device)
+    T_train_flat = T_train_flat.to(device)
+    q_train_flat = q_train_flat.to(device)
+
+    loss_history = []
+    accuracy_history = {
+        "u": [],
+        "v": [],
+        "p": [],
+        "T": [],
+        "q": []
+    }
+
+    for epoch in range(epochs):
+        model.train()  # Modo entrenamiento
+        epoch_loss_total = 0.0
+        start_time = time.time()
+
+        for batch in loader:
+            inputs, u_true, v_true, p_true, T_true, q_true = [t.to(device) for t in batch]
+
+            optimizer.zero_grad()
+
+            loss_total, loss_data, loss_physics = loss_pde(model, inputs, u_true, v_true, p_true, T_true, q_true, alpha, beta)
+            loss_total.backward()
+            optimizer.step()
+
+            # Acumula la pérdida total
+            epoch_loss_total += loss_total.item()
+
+        loss_history.append(epoch_loss_total / len(loader))
+
+        # Evaluar precisión después de la época
+        model.eval()  # Modo evaluación (sin dropout, etc.)
+        with torch.no_grad():
+            predictions = model(inputs_tensor)
+            u_pred, v_pred, p_pred, T_pred, q_pred = predictions[:, 0], predictions[:, 1], predictions[:, 2], predictions[:, 3], predictions[:, 4]
+
+            u_accuracy = compute_accuracy(u_pred, u_train_flat)
+            v_accuracy = compute_accuracy(v_pred, v_train_flat)
+            p_accuracy = compute_accuracy(p_pred, p_train_flat)
+            T_accuracy = compute_accuracy(T_pred, T_train_flat)
+            q_accuracy = compute_accuracy(q_pred, q_train_flat)
+
+            # Registrar precisión
+            accuracy_history["u"].append(u_accuracy)
+            accuracy_history["v"].append(v_accuracy)
+            accuracy_history["p"].append(p_accuracy)
+            accuracy_history["T"].append(T_accuracy)
+            accuracy_history["q"].append(q_accuracy)
+
+        print(f"Epoch {epoch}, Loss Total: {epoch_loss_total / len(loader):.6f}, "
+              f"Accuracy: u={u_accuracy:.2f}%, v={v_accuracy:.2f}%, p={p_accuracy:.2f}%, "
+              f"T={T_accuracy:.2f}%, q={q_accuracy:.2f}%, time {time.time() - start_time:.2f} s")
+
+    return loss_history, accuracy_history
+
+
+# In[270]:
 
 
 model = PINN()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-model.to(device)
-inputs_tensor = inputs_tensor.to(device)
-u_train_flat = u_train_flat.to(device)
-v_train_flat = v_train_flat.to(device)
-p_train_flat = p_train_flat.to(device)
-T_train_flat = T_train_flat.to(device)
-q_train_flat = q_train_flat.to(device)
+loss_history, accuracy_history = train_model(
+    model=model,
+    loader=loader,
+    inputs_tensor=inputs_tensor,
+    u_train_flat=u_train_flat,
+    v_train_flat=v_train_flat,
+    p_train_flat=p_train_flat,
+    T_train_flat=T_train_flat,
+    q_train_flat=q_train_flat,
+    optimizer=optimizer,
+    loss_pde=loss_pde,
+    compute_accuracy=compute_accuracy,
+    device=device,
+    alpha=1.0,
+    beta=10.0,
+    epochs=10
+)
 
 
-# In[ ]:
+# In[271]:
 
 
-epochs = 1000
+# Datos originales: (97500, 4)
+batch_size = 256  # Tamaño del batch
+channels = 4  # Número de características (latitud, longitud, nivel, tiempo)
+height, width = 50, 50  # Dimensiones espaciales
+
+num_points = (97500 // (50 * 50)) * (50 * 50)  # Total divisible por 2500
+
+# Truncar inputs_tensor
+inputs_tensor_truncated = inputs_tensor[:num_points]
+
+# Reorganizar al formato 4D
+inputs_tensor_cnn = inputs_tensor_truncated.view(-1, channels, height, width)
+print(f"Forma truncada para CNN: {inputs_tensor_cnn.shape}")
+
+
+# In[272]:
+
+
+print(f"Forma de inputs_tensor_cnn: {inputs_tensor_cnn.shape}")
+print(f"Forma de u_train_flat: {u_train_flat[:num_points].shape}")
+print(f"Forma de v_train_flat: {v_train_flat[:num_points].shape}")
+print(f"Forma de p_train_flat: {p_train_flat[:num_points].shape}")
+print(f"Forma de T_train_flat: {T_train_flat[:num_points].shape}")
+print(f"Forma de q_train_flat: {q_train_flat[:num_points].shape}")
+
+
+# In[273]:
+
+
+u_train_cnn = u_train_flat[:num_points].view(-1, 1, height, width)
+v_train_cnn = v_train_flat[:num_points].view(-1, 1, height, width)
+p_train_cnn = p_train_flat[:num_points].view(-1, 1, height, width)
+T_train_cnn = T_train_flat[:num_points].view(-1, 1, height, width)
+q_train_cnn = q_train_flat[:num_points].view(-1, 1, height, width)
+
+# Verificar formas
+print(f"Forma de u_train_cnn: {u_train_cnn.shape}")
+print(f"Forma de v_train_cnn: {v_train_cnn.shape}")
+print(f"Forma de p_train_cnn: {p_train_cnn.shape}")
+print(f"Forma de T_train_cnn: {T_train_cnn.shape}")
+print(f"Forma de q_train_cnn: {q_train_cnn.shape}")
+
+
+# In[274]:
+
+
+dataset_cnn = TensorDataset(
+    inputs_tensor_cnn,  # Entrada para la CNN
+    u_train_cnn,        # Salidas reorganizadas
+    v_train_cnn,
+    p_train_cnn,
+    T_train_cnn,
+    q_train_cnn
+)
+
+# Crear el DataLoader
+loader_cnn = DataLoader(dataset_cnn, batch_size=batch_size, shuffle=True)
+print(f"DataLoader creado con éxito: {len(loader_cnn)} batches")
+
+
+# In[275]:
+
+
+print(f"Forma del dataset:")
+for data in dataset_cnn[0]:
+    print(data.shape)
+
+
+# In[280]:
+
+
+def loss_pde_cnn_1(model, inputs, u_true, v_true, p_true, T_true, q_true):
+    pred = model(inputs)
+    loss_data = (
+        torch.mean((pred[:, 0, :, :] - u_true[:, 0, :, :]) ** 2) +
+        torch.mean((pred[:, 1, :, :] - v_true[:, 0, :, :]) ** 2) +
+        torch.mean((pred[:, 2, :, :] - p_true[:, 0, :, :]) ** 2) +
+        torch.mean((pred[:, 3, :, :] - T_true[:, 0, :, :]) ** 2) +
+        torch.mean((pred[:, 4, :, :] - q_true[:, 0, :, :]) ** 2)
+    )
+    return loss_data
+
+
+# In[285]:
+
+
+def loss_pde_cnn(model, x, u_true, v_true, p_true, T_true, q_true, alpha=1.0, beta=1.0):
+    pred = model(x)
+    u_pred, v_pred, p_pred, T_pred, q_pred = pred[:, 0], pred[:, 1], pred[:, 2], pred[:, 3], pred[:, 4]
+    loss_data = (
+        torch.mean((pred[:, 0, :, :] - u_true[:, 0, :, :]) ** 2) +
+        torch.mean((pred[:, 1, :, :] - v_true[:, 0, :, :]) ** 2) +
+        torch.mean((pred[:, 2, :, :] - p_true[:, 0, :, :]) ** 2) +
+        torch.mean((pred[:, 3, :, :] - T_true[:, 0, :, :]) ** 2) +
+        torch.mean((pred[:, 4, :, :] - q_true[:, 0, :, :]) ** 2)
+    )
+    
+    # Calcula gradientes para cada término
+    u_x, u_y, u_t = compute_gradients(u_pred, x)
+    v_x, v_y, v_t = compute_gradients(v_pred, x)
+    T_x, T_y, T_t = compute_gradients(T_pred, x)
+    q_x, q_y, q_t = compute_gradients(q_pred, x)
+    p_x, p_y, _ = compute_gradients(p_pred, x)
+
+    # Define los términos de la pérdida
+    momentum_u = u_t + u_pred * u_x + v_pred * u_y + p_x
+    momentum_v = v_t + u_pred * v_x + v_pred * v_y + p_y
+    continuity = u_x + v_y
+    energy = T_t + u_pred * T_x + v_pred * T_y
+    moisture = q_t + u_pred * q_x + v_pred * q_y
+
+
+
+    loss_physics = (
+        torch.mean(momentum_u ** 2) +
+        torch.mean(momentum_v ** 2) +
+        torch.mean(continuity ** 2) +
+        torch.mean(energy ** 2) +
+        torch.mean(moisture ** 2)
+    )
+
+    loss_total = alpha * loss_data + beta * loss_physics
+    return loss_total, loss_data, loss_physics
+
+
+# In[291]:
+
+
 loss_history = []
+loss_data_history = []
+loss_physics_history = []
+alpha = 0.5
+beta = 1
+model = PINNWithCNN().to(device)
+optimizer = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.9, weight_decay=1e-2)
+epochs = 2000
+
 for epoch in range(epochs):
-    model.train()  # Modo entrenamiento
-    epoch_loss_total = 0.0
-    start_time = time.time()
+    model.train()
+    epoch_loss = 0.0
+    epoch_loss_data = 0.0
+    epoch_loss_physics = 0.0
 
-    for batch in loader:
-        # Dividir los datos del batch
+    for batch in loader_cnn:
         inputs, u_true, v_true, p_true, T_true, q_true = [t.to(device) for t in batch]
-        
-        inputs = inputs.clone().detach().requires_grad_(True)
-        
-        optimizer.zero_grad()  # Resetear gradientes
 
-        # Calcula ambas pérdidas
-        loss_data, loss_physics = loss_pde(model, inputs, u_true, v_true, p_true, T_true, q_true)
-        
-        # Combina las pérdidas
-        loss_total = loss_data + loss_physics
-
-        # Retropropagación
+        optimizer.zero_grad()
+        # Pérdida con la primera función
+        loss_total, loss_data, loss_physics = loss_pde_cnn(model, inputs, u_true, v_true, p_true, T_true, q_true, alpha=1.0, beta=0)
         loss_total.backward()
         optimizer.step()
+        epoch_loss += loss_total.item()
+        epoch_loss_data += loss_data.item()
+        epoch_loss_physics += loss_physics.item()
 
-        # Acumula la pérdida total
-        epoch_loss_total += loss_total.item()
+    loss_history.append(epoch_loss / len(loader_cnn))
+    loss_data_history.append(epoch_loss_data / len(loader_cnn))
+    loss_physics_history.append(epoch_loss_physics / len(loader_cnn))
 
-    loss_history.append(epoch_loss_total / len(loader))
+    print(f"Epoch {epoch + 1}/{epochs}, Total Loss: {epoch_loss / len(loader_cnn):.6f}, "
+          f"Data Loss: {epoch_loss_data / len(loader_cnn):.6f}, "
+          f"Physics Loss: {epoch_loss_physics / len(loader_cnn):.6f}")
 
-    # Evaluar precisión después de la época
-    model.eval()  # Modo evaluación (sin dropout, etc.)
-    with torch.no_grad():
-        predictions = model(inputs_tensor)
-        u_pred, v_pred, p_pred, T_pred, q_pred = predictions[:, 0], predictions[:, 1], predictions[:, 2], predictions[:, 3], predictions[:, 4]
 
-        u_accuracy = compute_accuracy(u_pred, u_train_flat)
-        v_accuracy = compute_accuracy(v_pred, v_train_flat)
-        p_accuracy = compute_accuracy(p_pred, p_train_flat)
-        T_accuracy = compute_accuracy(T_pred, T_train_flat)
-        q_accuracy = compute_accuracy(q_pred, q_train_flat)
+# In[292]:
 
-    print(f"Epoch {epoch}, Loss Total: {epoch_loss_total / len(loader):.6f}, "
-          f"Accuracy: u={u_accuracy:.2f}%, v={v_accuracy:.2f}%, p={p_accuracy:.2f}%, "
-          f"T={T_accuracy:.2f}%, q={q_accuracy:.2f}%, time {time.time() - start_time:.2f} s")
+
+plt.figure(figsize=(10, 6))
+plt.plot(loss_history, label='Total Loss')
+plt.plot(loss_data_history, label='Data Loss')
+plt.plot(loss_physics_history, label='Physics Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.title('Loss Components Over Epochs')
+plt.legend()
+plt.grid()
+plt.show()
 
