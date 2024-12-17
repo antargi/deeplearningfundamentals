@@ -1,0 +1,51 @@
+En lo que se refiere a los modelos tradicionales, se nombran en la literatura como Modelos de Circulación General (GCM por sus siglas en inglés). Referidos a que el clima es impulsado por la circulación de energía y agua, carbono y otros componentes de los sistemas de la tierra. De lo anterior se puede desprender diferentes tipos de modelos de acuerdo a los componentes que se desean estudiar, por ejemplo:
+
+\begin{itemize}
+    \item Modelos Atmosféricos de Circulación General (AGCM): Se centran exclusivamente en la atmósfera, simulando variables como la temperatura, la presión y los vientos. Estos modelos requieren datos de entrada sobre la superficie terrestre y las condiciones oceánicas.
+    \item Modelos Oceánicos de Circulación General (OGCM): Se enfocan en la dinámica de los océanos, incluyendo corrientes, temperatura y salinidad. Son esenciales para comprender fenómenos como El Niño y La Niña.
+    \item Modelos Acoplados Atmosfera-Océano (AOGCM): Integran tanto la atmósfera como los océanos, permitiendo la simulación de interacciones complejas entre ambos sistemas. Son ampliamente utilizados para estudiar el cambio climático y realizar proyecciones futuras.
+    \item Modelos de Clima Global (GCM completos): Además de la atmósfera y los océanos, incorporan otros componentes como la criósfera (hielos y nieves) y la biosfera, ofreciendo una representación más completa del sistema climático terrestre.
+\end{itemize}
+
+Existen versiones con mayor resolución llamados RCM, desde 10 a 50 km por lado. Se pueden encontrar diversos modelos según la región geográfica que se desea estudiar.
+
+En esta materia también es importante destacar el \textit{downscaling}, que consta de ser una técnica donde se pueden reducir los resultados de GCM enfocada en una región determinada, a fin de obtener las celdas de la cuadrícula grande en unas más pequeñas. Como si se hiciese una especie de \textit{zoom}. Existen varias técnicas asociadas como la dinámica, que toma los resulados a gran escala y los utiliza como condiciones límite para los modelos meteorológicos de menor escala. Dado que esta técnica implica ejecutar modelos globales y regionales, requiere de grandes recursos computacionales. 
+
+Existe otra forma, considerada como una reducción de escala estadística, que consta de desglozar las celdas grandes y tomar datos anteriores de las múltiples ubicaciones del interior y así formar un patrón estadístico que sea consistente con el pasado. 
+
+
+
+Notas:
+
+Metodología:
+
+En primera instancia, se utiliza la base de datos de ERA5, la cual es un conjunto de datos de reanálisis climático desarrollado por el Centro Europeo de Pronósticos Meteorológicos a Plazo Medio (ECMWF). El rango temporal es de 1959 a 2022, con registros cada 6 horas, por ende son 4 registros por día. La resolución especial es de 1440x721 y eso sugiere que existen 1440 puntos horizontales (longuitud) y 721 verticales (latitud). La resolución corresponde aproximadamente a  0.25°, considerándose como fina. 
+
+El dataset contiene múltiples variables meteorológicas y climáticas, como temperatura a 2 metros, velocidad del viento a 10 metros, presión a nivel del mar, humedad específica, entre otras. Estas variables están organizadas en dimensiones de tiempo (time: 92044), latitud (latitude: 721), longitud (longitude: 1440) y niveles verticales (level: 13), lo que hace que el tamaño total del dataset sea significativo, superando los 755 GB.
+
+Considerando lo anterior, se extrajo un subconjunto que representa el área geográfica de Chile para analizar las condiciones específicas de la región, con un rango de latitud de -56° a -17° y un rango de longitud de 280° a 310°. Este subconjunto incluye 157 puntos de latitud, 121 puntos de longitud y mantiene las mismas variables climáticas.
+
+Luego se generaron gráficos para analizar las principales variables climáticas sobre el Cono Sur, partiendo por la máscara tierra-mar y luego la temperatura a distintos niveles atmosféricos. Además, se superpusieron direcciones de vientos, humedad específica y presión en la superficie, como también el geopotencial. El objetivo constaba en identificar visualmente patrones de circulación atmosférica, gradientes térmicos y relaciones de presión, viento, humedad, temperatura, etc.
+
+Luego se realizó un proceso de extracción, almacenamiento y análisis de un subconjunto del \textit{dataset} climático sobre el área de Chile durante enero de 2010. Se seleccionaron variables clave: \texttt{u\_component\_of\_wind}, \texttt{v\_component\_of\_wind}, \texttt{temperature}, \texttt{specific\_humidity}, y \texttt{geopotential} en el nivel atmosférico 10, acotando el rango temporal entre el 1 y el 31 de enero de 2010. El \textit{subset} fue particionado (\textit{chunked}) en bloques optimizados para el manejo eficiente con Dask (time=10, latitude=50, longitude=50) y almacenado en formato Zarr para facilitar su análisis. Para finalizar y previo al preprocesamiento, se analizaron las distribuciones originales de cada variable mediante histogramas, a fin de identificar patrones o anomalías en el comportamiento climático de la región durante este periodo.
+
+
+
+
+
+
+
+Se definieron 2 modelos para poder llevar a cabo este laboratorio. El primer modelo es un acercamiento para analizar patrones espaciales en los datos climáticos. Para ello, se presentan dos modelos con enfoque de auto-codificación para la reconstrucción de variables climáticas a partir de entradas multicanal, combinando datos climáticos, embeddings espaciales y temporales, e integrando restricciones físicas para mejorar la precisión y consistencia del modelo.
+
+\texttt{SimpleClimateModel}, es una red neuronal convolucional de 3 capas que busca responder a la naturaleza espacial de los datos climáticos, deibod al beneficio de las CNN para procesar datos estructurados en mallas (como mapas de variables climáticas), ya que explotan relaciones locales a través de filtros que capturan patrones espaciales relevantes, como gradientes de temperatura o movimientos de viento.
+
+Por otro lado, se construyó \texttt{ClimateModelWithEmbeddings}, cuya red neuronal convolucional de 3 capas extiende la capacidad del modelo básico al incluir \textbf{embeddings espaciales y temporales} como entradas adicionales. Estos \textit{embeddings} permiten al modelo capturar información contextual sobre la localización geográfica (latitud y longitud) y la estacionalidad temporal (día del año y hora del día). La arquitectura utiliza filtros convolucionales más complejos (32 y 64 filtros) para procesar un total de 13 canales de entrada, lo que mejora su capacidad de representar patrones climáticos complejos al combinar variables físicas con coordenadas espacio-temporales. Este diseño potencia la extracción de características al integrar relaciones físicas y geográficas en los datos, resultando en una reconstrucción más precisa de las variables climáticas.
+
+Una comparación clara se puede ver en el anexo, haciendo referencia directa al número de canales de entrada, número de salida, arquitectura, parámetros totales, capacidad de aprendizaje, objetivo y requerimientos de memoria. 
+
+
+\subsubsection{Definición del bucle}
+
+El bucle de entrenamiento del modelo \texttt{ClimateModelWithEmbeddings} consiste en 100 épocas, donde en cada iteración se realiza un \textit{forward} con los datos de entrada combinados (5 variables climáticas y 8 \textit{embeddings} espaciales/temporales), y se calcula la pérdida total como la suma del error de reconstrucción (\textit{MSE}) y una pérdida física adicional basada en la ecuación de advección (calculada a partir de los gradientes de temperatura y los componentes del viento $u$ y $v$). Luego, el gradiente se retropropaga y los parámetros del modelo se actualizan usando el optimizador Adam. Al finalizar cada época, el modelo se evalúa en el conjunto de validación usando la misma pérdida combinada para obtener una medida del rendimiento general. Se imprimen las pérdidas promedio de entrenamiento y validación, permitiendo monitorear la convergencia del modelo.
+
+
